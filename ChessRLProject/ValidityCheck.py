@@ -1,5 +1,3 @@
-import pygame
-
 king_moved = {'w': False, 'b': False}
 rook_moved = {'w': [False, False], 'b': [False, False]}
 castling_done = {'w': False, 'b': False}
@@ -164,8 +162,10 @@ def perform_castling(board, start_row, start_col, end_row, end_col, player):
             board[0][0] = ' '
             board[0][2] = 'k'
             board[0][3] = 'r'
-    king_moved[player] = True
-    castling_done[player] = True
+    # NOTE: king_moved / castling_done are NOT updated here.
+    # chess_env.ChessEnv manages its own self.king_moved; updating the
+    # module-level dicts here caused them to be corrupted by simulations
+    # inside _leaves_king_in_check.
 
 
 def is_valid_pawn_move(board, start_row, start_col, end_row, end_col, player, en_passant_possible):
@@ -191,9 +191,9 @@ def is_valid_pawn_move(board, start_row, start_col, end_row, end_col, player, en
 
     # En passant
     if en_passant_possible and abs(start_col - end_col) == 1 and end_row == start_row + direction:
-        if player == 'w' and start_row == 3 and board[start_row][end_col] == 'p':
+        if player == 'w' and start_row == 3 and end_col == en_passant_possible[1] and board[start_row][end_col] == 'p':
             return True
-        if player == 'b' and start_row == 4 and board[start_row][end_col] == 'BP':
+        if player == 'b' and start_row == 4 and end_col == en_passant_possible[1] and board[start_row][end_col] == 'BP':
             return True
 
     return False

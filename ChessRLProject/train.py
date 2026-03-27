@@ -34,10 +34,11 @@ DEPTH                  = 5           # eval depth (self-play mode only)
 VS_STOCKFISH           = True        # True → agent vs Stockfish opponent
 STOCKFISH_OPPONENT_DEPTH = 1         # depth=1 ≈ 1200 Elo (beatable by a learning agent)
 N_ENVS                 = 6           # SubprocVecEnv workers (= physical cores)
-SAVE_EVERY             = 150_000
+SAVE_EVERY             = 100_000
 
-LOG_DIR        = "./tb_logs/"
-CHECKPOINT_DIR = "./checkpoints/"
+_HERE          = os.path.dirname(os.path.abspath(__file__))
+LOG_DIR        = os.path.join(_HERE, "tb_logs")
+CHECKPOINT_DIR = os.path.join(_HERE, "checkpoints")
 
 NET_ARCH = [256, 256]
 # ──────────────────────────────────────────────────────────────────────────────
@@ -260,6 +261,8 @@ def resume(
                sf_opponent_depth=2, extra_timesteps=1_000_000)
     """
     import functools
+    os.makedirs(LOG_DIR, exist_ok=True)
+    os.makedirs(CHECKPOINT_DIR, exist_ok=True)
     print(f"Resuming from : {checkpoint_path}")
     print(f"  vs_stockfish         : {vs_stockfish}")
     print(f"  sf_opponent_depth    : {sf_opponent_depth}")
@@ -277,6 +280,7 @@ def resume(
     )
     env   = make_vec_env(env_fn, n_envs=N_ENVS, vec_env_cls=SubprocVecEnv)
     model = MaskablePPO.load(checkpoint_path, env=env)
+    model.tensorboard_log = LOG_DIR   # checkpoint'teki eski relative path'i ezmek icin
 
     model.learning_rate = lr
     model.lr_schedule   = get_schedule_fn(lr)
@@ -351,10 +355,132 @@ def curriculum_vs_stockfish(start_checkpoint: str):
     print("\nCurriculum complete!  Final model:", ckpt)
 
 
+def _latest_checkpoint() -> str:
+    """checkpoints/ klasöründeki en yeni .zip dosyasını döndürür."""
+    import glob as _glob
+    files = _glob.glob(os.path.join(CHECKPOINT_DIR, "*.zip"))
+    if not files:
+        raise FileNotFoundError(f"Checkpoint bulunamadi: {CHECKPOINT_DIR}")
+    return max(files, key=os.path.getmtime)
+
+
+def improve(start_checkpoint: str = None):
+    """
+    En son checkpoint'ten depth-2 → depth-3 curriculum.
+
+    depth-1 zaten %85 win rate ile masterlanmis — tekrar egitmek zaman kaybi.
+    depth-2: 1.5M adim — kopru seviyesi
+    depth-3: 2.5M adim — hedef seviye (oncekinden daha uzun)
+
+    Toplam: ~4M ek adim.
+
+    Kullanim:
+        python train.py improve
+        python train.py improve checkpoints/baska_model.zip
+    """
+    stages = [
+        # (sf_opponent_depth, extra_steps, lr,    ent_coef, clip_range, prefix)
+        (2, 1_500_000, 7e-5,  0.025, 0.18, "improved_sfd2"),
+        (3, 2_500_000, 5e-5,  0.015, 0.15, "improved_sfd3"),
+    ]
+
+    if start_checkpoint is None:
+        start_checkpoint = _latest_checkpoint()
+
+    print(f"\nBaslangic checkpoint: {start_checkpoint}")
+    print(f"Toplam ek adim: {sum(s[1] for s in stages):,}")
+    print(f"Hedef cikti : improved_sfd3_sfd3.zip  (play_vs_bot icin hazir)\n")
+
+    ckpt = start_checkpoint
+    for sf_d, steps, lr, ent, clip, prefix in stages:
+        print(f"\n{'='*60}")
+        print(f"  IMPROVE  sf_depth={sf_d}  steps={steps:,}  lr={lr}  ent={ent}")
+        print(f"{'='*60}")
+        ckpt = resume(
+            checkpoint_path   = ckpt,
+            extra_timesteps   = steps,
+            vs_stockfish      = True,
+            sf_opponent_depth = sf_d,
+            lr                = lr,
+            ent_coef          = ent,
+            clip_range        = clip,
+            save_prefix       = prefix,
+        )
+
+    print(f"\nImprove tamamlandi! Final model: {ckpt}")
+    print("play_vs_bot.py ile oynamak icin:")
+    print(f"  python play_vs_bot.py {ckpt}")
+    return ckpt
+
+
+def stable_finetune(start_checkpoint: str = None):
+    """
+    Depth-3 sonrasi policy collapse'i onlemek icin dusuk LR ile fine-tune.
+
+    improved_sfd3 checkpoint'inden baslayarak:
+      depth-2: 2M adim, lr=2e-5, ent=0.008, clip=0.10  — stabilize + exploit
+      depth-3: 3M adim, lr=1e-5, ent=0.005, clip=0.08  — daha guclu rakibe karsı
+      depth-5: 1M adim, lr=5e-6, ent=0.003, clip=0.06  — son polish
+
+    Toplam: ~6M ek adim.
+
+    Kullanim:
+        python train.py stable
+        python train.py stable checkpoints/improved_sfd3_9204996_steps.zip
+    """
+    stages = [
+        # (sf_opponent_depth, extra_steps, lr,   ent_coef, clip_range, prefix)
+        (2, 2_000_000, 2e-5, 0.008, 0.10, "stable_sfd2"),
+        (3, 3_000_000, 1e-5, 0.005, 0.08, "stable_sfd3"),
+        (5, 1_000_000, 5e-6, 0.003, 0.06, "stable_sfd5"),
+    ]
+
+    if start_checkpoint is None:
+        # Oncelikle improved_sfd3 ara; yoksa en yeni checkpoint'i al
+        import glob as _glob
+        sfd3 = sorted(_glob.glob(os.path.join(CHECKPOINT_DIR, "improved_sfd3*.zip")))
+        start_checkpoint = sfd3[-1] if sfd3 else _latest_checkpoint()
+
+    print(f"\nBaslangic checkpoint : {start_checkpoint}")
+    print(f"Toplam ek adim       : {sum(s[1] for s in stages):,}")
+    print(f"Strateji             : dusuk LR + kucuk clip → policy collapse engellenir\n")
+
+    ckpt = start_checkpoint
+    for sf_d, steps, lr, ent, clip, prefix in stages:
+        print(f"\n{'='*60}")
+        print(f"  STABLE  sf_depth={sf_d}  steps={steps:,}  lr={lr}  ent={ent}  clip={clip}")
+        print(f"{'='*60}")
+        ckpt = resume(
+            checkpoint_path   = ckpt,
+            extra_timesteps   = steps,
+            vs_stockfish      = True,
+            sf_opponent_depth = sf_d,
+            lr                = lr,
+            ent_coef          = ent,
+            clip_range        = clip,
+            save_prefix       = prefix,
+        )
+
+    print(f"\nStable fine-tune tamamlandi! Final model: {ckpt}")
+    print("play_vs_bot.py ile oynamak icin:")
+    print(f"  python play_vs_bot.py {ckpt}")
+    return ckpt
+
+
 if __name__ == "__main__":
     args = sys.argv[1:]
 
-    if len(args) == 2 and args[0] == "curriculum":
+    if len(args) >= 1 and args[0] == "stable":
+        # python train.py stable
+        # python train.py stable checkpoints/improved_sfd3_9204996_steps.zip
+        ckpt = args[1] if len(args) >= 2 else None
+        stable_finetune(ckpt)
+    elif len(args) >= 1 and args[0] == "improve":
+        # python train.py improve
+        # python train.py improve checkpoints/baska_model.zip
+        ckpt = args[1] if len(args) >= 2 else None   # None → _latest_checkpoint() otomatik
+        improve(ckpt)
+    elif len(args) == 2 and args[0] == "curriculum":
         # python train.py curriculum checkpoints/chess_ppo_2000000_steps.zip
         curriculum_vs_stockfish(args[1])
     elif len(args) == 1 and args[0].endswith(".zip"):

@@ -128,10 +128,95 @@ def _after_move(env):
     return STATE_PLAYING, '', env.get_checked_king_pos()
 
 
+def _find_checkpoints(base):
+    """base klasörü ve checkpoints/ altındaki tüm .zip dosyalarını döndürür."""
+    found = []
+    for folder in [base, os.path.join(base, "checkpoints")]:
+        if os.path.isdir(folder):
+            for f in sorted(os.listdir(folder)):
+                if f.endswith(".zip"):
+                    found.append(os.path.join(folder, f))
+    return found
+
+
+def _checkpoint_menu(screen, clock, checkpoints):
+    """Checkpoint seçim ekranı. Seçilen dosyanın yolunu döndürür."""
+    BG      = (30, 30, 30)
+    TITLE   = (220, 200, 100)
+    NORMAL  = (200, 200, 200)
+    HOVER   = (255, 255, 120)
+    BAR     = (60, 80, 120)
+    BAR_H   = (80, 110, 180)
+
+    font_title = pygame.font.SysFont("Arial", 28, bold=True)
+    font_item  = pygame.font.SysFont("Arial", 20)
+
+    labels = [os.path.basename(p) for p in checkpoints]
+    item_h = 44
+    pad    = 20
+    menu_w = min(WIDTH - 80, 600)
+    menu_x = (WIDTH - menu_w) // 2
+
+    scroll = 0          # kaç satır aşağı kaydırıldı
+    visible = (HEIGHT - 120) // item_h
+
+    while True:
+        mx, my = pygame.mouse.get_pos()
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                pygame.quit()
+                sys.exit()
+            elif event.type == pygame.MOUSEWHEEL:
+                scroll = max(0, min(scroll - event.y, max(0, len(checkpoints) - visible)))
+            elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                for i in range(visible):
+                    idx = i + scroll
+                    if idx >= len(checkpoints):
+                        break
+                    ry = 100 + i * item_h
+                    if menu_x <= mx <= menu_x + menu_w and ry <= my <= ry + item_h - 4:
+                        return checkpoints[idx]
+
+        screen.fill(BG)
+        title_surf = font_title.render("Checkpoint Sec", True, TITLE)
+        screen.blit(title_surf, (WIDTH // 2 - title_surf.get_width() // 2, 30))
+        hint = font_item.render("Tiklayarak sec  |  Scroll ile kaydir", True, (140, 140, 140))
+        screen.blit(hint, (WIDTH // 2 - hint.get_width() // 2, 68))
+
+        for i in range(visible):
+            idx = i + scroll
+            if idx >= len(checkpoints):
+                break
+            ry    = 100 + i * item_h
+            rect  = pygame.Rect(menu_x, ry, menu_w, item_h - 4)
+            hov   = rect.collidepoint(mx, my)
+            pygame.draw.rect(screen, BAR_H if hov else BAR, rect, border_radius=6)
+            color = HOVER if hov else NORMAL
+            text  = font_item.render(labels[idx], True, color)
+            screen.blit(text, (menu_x + pad, ry + (item_h - 4 - text.get_height()) // 2))
+
+        pygame.display.flip()
+        clock.tick(60)
+
+
 def main():
-    model_path = sys.argv[1] if len(sys.argv) > 1 else \
-        os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                     "curriculum_sfd3_stable_sfd3.zip")
+    base = os.path.dirname(os.path.abspath(__file__))
+
+    pygame.init()
+    screen = pygame.display.set_mode((WIDTH, HEIGHT))
+    clock  = pygame.time.Clock()
+    pygame.display.set_caption("Chess vs Bot  |  Checkpoint sec...")
+
+    # Komut satırından verildiyse doğrudan kullan, yoksa menü aç
+    if len(sys.argv) > 1:
+        model_path = sys.argv[1]
+    else:
+        checkpoints = _find_checkpoints(base)
+        if not checkpoints:
+            print("Hic checkpoint bulunamadi! Klasorde .zip dosyasi olmali.")
+            pygame.quit()
+            sys.exit(1)
+        model_path = _checkpoint_menu(screen, clock, checkpoints)
 
     print(f"Model yukleniyor: {model_path}")
     model = MaskablePPO.load(
@@ -146,10 +231,6 @@ def main():
     print("  Koyu taslar (ust) → SEN (insan)")
     print("  Acik taslar (alt) → BOT")
     print("  R → yeniden baslat\n")
-
-    pygame.init()
-    screen = pygame.display.set_mode((WIDTH, HEIGHT))
-    clock  = pygame.time.Clock()
 
     env             = ChessEnv()
     state           = STATE_PLAYING

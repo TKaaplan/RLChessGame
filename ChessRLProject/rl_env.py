@@ -21,9 +21,10 @@ vs_stockfish=False  (self-play, original mode):
 vs_stockfish=True  (agent='b' vs Stockfish='w'):
   agent delivers checkmate   → +1.0
   Stockfish delivers checkmate → −1.0
-  stalemate                  → −0.05
-  move limit reached         → −0.3
-  all other moves            → −0.001  (step penalty only)
+  agent causes stalemate     → −0.05  (draw, slight penalty)
+  Stockfish causes stalemate → −0.3   (agent got stalemated)
+  move limit reached         → −0.5
+  all other moves            → Δ tanh(cp/400) − 0.001
 
 Requires:
   pip install gymnasium stable-baselines3 sb3-contrib python-chess tensorboard
@@ -208,9 +209,11 @@ class ChessRLEnv(gym.Env):
         if status == 'checkmate':
             return 1.0 if mover == 'b' else -1.0
         if status == 'stalemate':
-            return -0.05
+            # Agent caused stalemate (opponent has no moves) → slight penalty (draw, not a win)
+            # Stockfish caused stalemate (agent has no moves) → larger penalty
+            return -0.05 if mover == 'b' else -0.3
         if self._move_count >= MAX_MOVES:
-            return -0.3
+            return -0.5
         # Dense shaping: delta from 'b' perspective (negative cp = good for black)
         delta = _cp_to_value(-eval_after) - _cp_to_value(-self._eval_before)
         return delta - 0.001
@@ -222,7 +225,7 @@ class ChessRLEnv(gym.Env):
         self._chess.reset()
         self._move_count  = 0
         self._legal_moves = self._chess.get_legal_moves()
-        self._eval_before = self._get_eval()  # always needed for shaping
+        self._eval_before = self._get_eval() 
         return self._encode_state(), {"action_mask": self.action_masks()}
 
     def step(self, action: int):
@@ -234,15 +237,13 @@ class ChessRLEnv(gym.Env):
         """Agent ('b') makes a move, then Stockfish ('w') responds."""
         sr, sc, er, ec = self.decode_action(action)
 
-        # Invalid action → terminate episode
         if (sr, sc, er, ec) not in self._legal_moves:
             obs = self._encode_state()
             return obs, 0.0, True, False, {"action_mask": self.action_masks()}
 
-        # Agent promotion → always queen
         promotion = None
         if self._chess.needs_promotion(sr, sc, er, ec):
-            promotion = 'q'  # agent is 'b', so lowercase piece
+            promotion = 'q' 
 
         self._chess.make_move(sr, sc, er, ec, promotion=promotion)
         self._move_count += 1
